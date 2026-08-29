@@ -1,6 +1,7 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 Persistent
+CoordMode "Mouse", "Screen"   ; 顶边判断必须用屏幕坐标，否则激活窗口时坐标相对窗口而失效
 
 ; ============================================================
 ; KeyRemap - 极简按键映射工具 (AutoHotkey v2)
@@ -12,6 +13,8 @@ global configFile := A_ScriptDir "\KeyRemap.ini"
 global mappings := []          ; 元素: {src: "CapsLock", dst: "Enter"}
 global activeKeys := []        ; 当前已注册的热键，便于卸载
 global enabled := true
+global wheelVolume := true      ; 屏幕顶边滚轮调音量
+global wheelBrightness := true  ; 屏幕顶边 Ctrl+滚轮调亮度
 global mainGui := ""
 
 ; 下拉框常用键（ Combo 可编辑，允许手工输入任意键名 ）
@@ -41,11 +44,13 @@ SendMapped(dst, *) {
 ; 鼠标指针位于任意显示器顶边（2px 容差）时：
 ;   滚轮       -> 调节系统音量（上滑调大）
 ;   Ctrl+滚轮  -> 调节屏幕亮度（仅支持笔记本内置屏等 WMI 可调设备）
-#HotIf MouseAtScreenTop()
-WheelUp::VolumeWheel(1)
-WheelDown::VolumeWheel(-1)
-^WheelUp::BrightnessWheel(1)
-^WheelDown::BrightnessWheel(-1)
+; 两项均可在设置窗口中独立开关
+#HotIf MouseAtScreenTop() && wheelVolume
+WheelUp::Send "{Volume_Up}"
+WheelDown::Send "{Volume_Down}"
+#HotIf MouseAtScreenTop() && wheelBrightness
+^WheelUp::AdjustBrightness(10)
+^WheelDown::AdjustBrightness(-10)
 #HotIf
 
 MouseAtScreenTop() {
@@ -58,13 +63,8 @@ MouseAtScreenTop() {
     return false
 }
 
-VolumeWheel(dir, *) {
-    Send(dir > 0 ? "{Volume_Up}" : "{Volume_Down}")
-    ShowOsd("音量 " (dir > 0 ? "+" : "-"))
-}
-
-BrightnessWheel(dir, *) {
-    static step := 10
+AdjustBrightness(delta, *) {
+    static warned := false
     try {
         svc := ComObject("WbemScripting.SWbemLocator").ConnectServer(".", "root\wmi")
         cur := -1
@@ -72,19 +72,15 @@ BrightnessWheel(dir, *) {
             cur := m.CurrentBrightness
         if (cur < 0)
             throw Error("no brightness interface")
-        newVal := Max(0, Min(100, cur + dir * step))
+        newVal := Max(0, Min(100, cur + delta))
         for m in svc.ExecQuery("SELECT * FROM WmiMonitorBrightnessMethods")
             m.WmiSetBrightness(1, newVal)
-        ShowOsd("亮度 " newVal "%")
     } catch {
-        ShowOsd("当前显示器不支持亮度调节")
+        if !warned {
+            warned := true
+            TrayTip("KeyRemap", "当前显示器不支持亮度调节", 2)
+        }
     }
-}
-
-; 屏幕中央短暂提示，800ms 后自动消失
-ShowOsd(text) {
-    ToolTip(text)
-    SetTimer(() => ToolTip(), -800)
 }
 
 ApplyHotkeys() {
@@ -106,13 +102,15 @@ ApplyHotkeys() {
 
 ; ================= 配置读写 =================
 LoadConfig() {
-    global mappings, enabled, configFile
+    global mappings, enabled, wheelVolume, wheelBrightness, configFile
     mappings := []
     if !FileExist(configFile) {
         mappings.Push({src: "CapsLock", dst: "Enter"})   ; 默认映射
         return
     }
     enabled := (IniRead(configFile, "Settings", "Enabled", "1") = "1")
+    wheelVolume := (IniRead(configFile, "Settings", "WheelVolume", "1") = "1")
+    wheelBrightness := (IniRead(configFile, "Settings", "WheelBrightness", "1") = "1")
     loop 100 {
         line := IniRead(configFile, "Mappings", A_Index, "")
         if (line = "")
@@ -124,10 +122,12 @@ LoadConfig() {
 }
 
 SaveConfig() {
-    global mappings, enabled, configFile
+    global mappings, enabled, wheelVolume, wheelBrightness, configFile
     if FileExist(configFile)
         FileDelete(configFile)
     IniWrite(enabled ? "1" : "0", configFile, "Settings", "Enabled")
+    IniWrite(wheelVolume ? "1" : "0", configFile, "Settings", "WheelVolume")
+    IniWrite(wheelBrightness ? "1" : "0", configFile, "Settings", "WheelBrightness")
     for i, m in mappings
         IniWrite(m.src "|" m.dst, configFile, "Mappings", i)
 }
@@ -179,7 +179,7 @@ UpdateTray() {
 
 ; ================= 设置窗口 =================
 ShowSettings(*) {
-    global mainGui, mappings, enabled, keyList
+    global mainGui, mappings, enabled, wheelVolume, wheelBrightness, keyList
 
     if (mainGui != "") {
         mainGui.Show()
@@ -212,6 +212,12 @@ ShowSettings(*) {
     chkAuto := g.AddCheckbox("x+24", "开机自启")
     chkAuto.Value := IsAutostart()
 
+    ; 顶边滚轮功能开关
+    chkWheelVol := g.AddCheckbox("xm y+10", "顶边滚轮调音量")
+    chkWheelVol.Value := wheelVolume
+    chkWheelBri := g.AddCheckbox("x+24", "顶边 Ctrl+滚轮调亮度")
+    chkWheelBri.Value := wheelBrightness
+
     ; 保存
     btnSave := g.AddButton("xm y+16 w432 h34 Default", "保存并应用")
 
@@ -233,18 +239,22 @@ ShowSettings(*) {
     }
 
     ToggleFromGui(*) {
-        global enabled
+        global enabled, wheelVolume, wheelBrightness
         enabled := chkEnable.Value
+        wheelVolume := chkWheelVol.Value
+        wheelBrightness := chkWheelBri.Value
         ApplyHotkeys()
         UpdateTray()
     }
 
     SaveApply(*) {
-        global mappings, enabled
+        global mappings, enabled, wheelVolume, wheelBrightness
         mappings := []
         loop lv.GetCount()
             mappings.Push({src: lv.GetText(A_Index, 1), dst: lv.GetText(A_Index, 2)})
         enabled := chkEnable.Value
+        wheelVolume := chkWheelVol.Value
+        wheelBrightness := chkWheelBri.Value
         SaveConfig()
         SetAutostart(chkAuto.Value)
         ApplyHotkeys()
@@ -256,6 +266,8 @@ ShowSettings(*) {
     btnAdd.OnEvent("Click", AddMapping)
     btnDel.OnEvent("Click", DelMapping)
     chkEnable.OnEvent("Click", ToggleFromGui)
+    chkWheelVol.OnEvent("Click", ToggleFromGui)
+    chkWheelBri.OnEvent("Click", ToggleFromGui)
     btnSave.OnEvent("Click", SaveApply)
     g.OnEvent("Close", (*) => g.Hide())   ; 关闭按钮仅隐藏，程序驻留托盘
 
