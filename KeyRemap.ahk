@@ -5,6 +5,7 @@ Persistent
 ; ============================================================
 ; KeyRemap - 极简按键映射工具 (AutoHotkey v2)
 ; 功能: 键位映射 / 托盘驻留 / 开机自启 / INI 配置持久化
+;       屏幕顶边滚轮调音量 / 顶边 Ctrl+滚轮调亮度
 ; ============================================================
 
 global configFile := A_ScriptDir "\KeyRemap.ini"
@@ -34,6 +35,56 @@ if firstRun
 ; ================= 热键核心 =================
 SendMapped(dst, *) {
     Send("{Blind}{" dst "}")
+}
+
+; ================= 屏幕顶边滚轮 =================
+; 鼠标指针位于任意显示器顶边（2px 容差）时：
+;   滚轮       -> 调节系统音量（上滑调大）
+;   Ctrl+滚轮  -> 调节屏幕亮度（仅支持笔记本内置屏等 WMI 可调设备）
+#HotIf MouseAtScreenTop()
+WheelUp::VolumeWheel(1)
+WheelDown::VolumeWheel(-1)
+^WheelUp::BrightnessWheel(1)
+^WheelDown::BrightnessWheel(-1)
+#HotIf
+
+MouseAtScreenTop() {
+    MouseGetPos(&mx, &my)
+    loop MonitorGetCount() {
+        MonitorGet(A_Index, &mL, &mT, &mR, &mB)
+        if (mx >= mL && mx < mR && my >= mT && my <= mT + 2)
+            return true
+    }
+    return false
+}
+
+VolumeWheel(dir, *) {
+    Send(dir > 0 ? "{Volume_Up}" : "{Volume_Down}")
+    ShowOsd("音量 " (dir > 0 ? "+" : "-"))
+}
+
+BrightnessWheel(dir, *) {
+    static step := 10
+    try {
+        svc := ComObject("WbemScripting.SWbemLocator").ConnectServer(".", "root\wmi")
+        cur := -1
+        for m in svc.ExecQuery("SELECT CurrentBrightness FROM WmiMonitorBrightness")
+            cur := m.CurrentBrightness
+        if (cur < 0)
+            throw Error("no brightness interface")
+        newVal := Max(0, Min(100, cur + dir * step))
+        for m in svc.ExecQuery("SELECT * FROM WmiMonitorBrightnessMethods")
+            m.WmiSetBrightness(1, newVal)
+        ShowOsd("亮度 " newVal "%")
+    } catch {
+        ShowOsd("当前显示器不支持亮度调节")
+    }
+}
+
+; 屏幕中央短暂提示，800ms 后自动消失
+ShowOsd(text) {
+    ToolTip(text)
+    SetTimer(() => ToolTip(), -800)
 }
 
 ApplyHotkeys() {
